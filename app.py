@@ -195,7 +195,7 @@ def webhook(store_id):
                 if survey and qidx + 1 < len(survey["questions"]):
                     flex = build_question_flex(survey, qidx + 1)
                     line_reply(token, ev["replyToken"], [flex])
-                else:
+                elif survey and survey.get("show_thanks", True):
                     line_reply(token, ev["replyToken"],
                               [{"type": "text", "text": "ご回答ありがとうございました！"}])
 
@@ -217,7 +217,7 @@ def webhook(store_id):
                     save_answer(active["id"], user_id, target, text)
                     if target + 1 < len(qs):
                         line_reply(token, ev["replyToken"], [build_question_flex(active, target + 1)])
-                    else:
+                    elif active.get("show_thanks", True):
                         line_reply(token, ev["replyToken"],
                                   [{"type": "text", "text": "ご回答ありがとうございました！"}])
 
