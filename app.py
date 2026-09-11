@@ -81,6 +81,17 @@ def get_survey(survey_id):
     rows = sb_get("surveys", {"id": f"eq.{survey_id}", "select": "*"})
     return rows[0] if rows else None
 
+def get_profile(token, user_id):
+    try:
+        r = requests.get(f"{LINE_API}/v2/bot/profile/{user_id}",
+                         headers={"Authorization": f"Bearer {token}"})
+        if r.ok:
+            j = r.json()
+            return j.get("displayName"), j.get("pictureUrl")
+    except Exception:
+        pass
+    return None, None
+
 
 # ── Flex メッセージ構築 ───────────────────────────────────
 def build_question_flex(survey, qindex):
@@ -147,23 +158,33 @@ def line_multicast(token, user_ids, messages):
 
 
 # ── 回答の保存 ───────────────────────────────────────────
-def get_or_create_response(survey_id, user_id):
+def get_or_create_response(survey_id, user_id, token=None):
     rows = sb_get("survey_responses", {"survey_id": f"eq.{survey_id}", "line_user_id": f"eq.{user_id}",
                                        "select": "*", "limit": "1"})
     if rows:
         return rows[0]
+    display_name, picture_url = (None, None)
+    if token:
+        display_name, picture_url = get_profile(token, user_id)
     created = sb_post("survey_responses", {
         "survey_id": survey_id, "line_user_id": user_id, "answers": [], "tags": [],
+        "display_name": display_name, "picture_url": picture_url,
     })
     return created[0] if created else None
 
-def save_answer(survey_id, user_id, qindex, value):
-    resp = get_or_create_response(survey_id, user_id)
+def save_answer(survey_id, user_id, qindex, value, token=None, auto_tag=None):
+    resp = get_or_create_response(survey_id, user_id, token)
     answers = resp.get("answers") or []
     while len(answers) <= qindex:
         answers.append("")
     answers[qindex] = str(value)
-    sb_patch("survey_responses", {"id": f"eq.{resp['id']}"}, {"answers": answers})
+    patch = {"answers": answers}
+    if auto_tag:
+        tags = list(resp.get("tags") or [])
+        if auto_tag not in tags:
+            tags.append(auto_tag)
+        patch["tags"] = tags
+    sb_patch("survey_responses", {"id": f"eq.{resp['id']}"}, patch)
     return resp["id"]
 
 
@@ -182,6 +203,7 @@ def webhook(store_id):
         if etype == "follow":
             survey = get_active_survey(store_id, "welcome")
             if survey and survey.get("questions"):
+                get_or_create_response(survey["id"], user_id, token)  # プロフィール取得・レコード作成
                 flex = build_question_flex(survey, 0)
                 line_reply(token, ev["replyToken"], [flex])
 
@@ -190,8 +212,13 @@ def webhook(store_id):
             if data.startswith("survey_answer:"):
                 _, survey_id, qidx, value = data.split(":", 3)
                 qidx = int(qidx)
-                save_answer(survey_id, user_id, qidx, value)
                 survey = get_survey(survey_id)
+                auto_tag = None
+                if survey:
+                    q = survey["questions"][qidx]
+                    if q.get("type") in ("choice", "rating") and q.get("autoTag", True):
+                        auto_tag = str(value) if q["type"] == "choice" else f"評価{value}"
+                save_answer(survey_id, user_id, qidx, value, token, auto_tag)
                 if survey and qidx + 1 < len(survey["questions"]):
                     flex = build_question_flex(survey, qidx + 1)
                     line_reply(token, ev["replyToken"], [flex])
@@ -205,7 +232,7 @@ def webhook(store_id):
             text = ev["message"]["text"]
             active = get_active_survey(store_id, "welcome") or get_active_survey(store_id, "manual")
             if active:
-                resp = get_or_create_response(active["id"], user_id)
+                resp = get_or_create_response(active["id"], user_id, token)
                 answers = resp.get("answers") or []
                 qs = active.get("questions", [])
                 target = None
@@ -214,7 +241,7 @@ def webhook(store_id):
                         target = i
                         break
                 if target is not None:
-                    save_answer(active["id"], user_id, target, text)
+                    save_answer(active["id"], user_id, target, text, token)
                     if target + 1 < len(qs):
                         line_reply(token, ev["replyToken"], [build_question_flex(active, target + 1)])
                     elif active.get("show_thanks", True):
